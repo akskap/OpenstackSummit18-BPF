@@ -1,0 +1,124 @@
+#! /bin/bash
+set -e
+
+VBOX_MOUNTED_PATH="/media/sf_demo_shared"
+OUTPUT_FILENAME="demo.svg"
+PG_CONTAINER_NAME="ggaurav10/postgres"
+PG_TEST_SCHEMA="postgres"
+
+function get_pg_container_id(){
+  echo "$(docker ps | grep "ggaurav10/postgres" | awk '{print $1}')"
+}
+
+function create_pg_container(){
+  echo "Creating a PG container.."
+  docker run -d "$PG_CONTAINER_NAME"
+}
+
+function attach_bcc_container(){
+  local target_container_id
+  target_container_id="$1"
+  if [[ "X$target_container_id" == "X" ]]; then
+     echo -e "\\n\\n[WARNING] Need a container id to attach to...Switching to defaults\\n\\n"
+     target_container_id="$(get_pg_container_id)"
+     echo "Found container id : $target_container_id"
+  fi
+ 
+  echo "Starting BCC container.."
+    
+  if docker run -d                              \
+       --privileged                             \
+       --pid=host                               \
+       --cap-add=ALL                            \
+       -v /lib/modules:/lib/modules:ro          \
+       -v /usr/src:/usr/src:ro                  \
+       -v /etc/localtime:/etc/localtime:ro      \
+       -p 5000:5000                             \
+       bccrestv4:latest; then
+
+    echo "Attached BCC container to container with container ID $target_container_id"
+  fi
+
+}
+
+function init_schema(){
+  local pg_container_id
+  pg_container_id="$(get_pg_container_id)"
+  echo "Initializing postgres container id with test schema.."
+  docker exec "$pg_container_id" pgbench -h localhost -p 5432 -i -s 50 "$PG_TEST_SCHEMA"  
+}
+
+function load_pg_db(){
+  local pg_container_id
+  pg_container_id="$(get_pg_container_id)"
+  echo "Loading pg container $pg_container_id with pgbench..."
+  docker exec "$pg_container_id" pgbench -h localhost -p 5432 -c 10 -j 2 -t 10000 "$PG_TEST_SCHEMA" &
+}
+
+function generate_flamegraph(){
+  pushd /usr/share/bcc/tools/bcc-tools-REST
+  ./geturl.py "http://localhost:5000/offcputimenew?duration=20&flame=true" > "$VBOX_MOUNTED_PATH"/"$OUTPUT_FILENAME"
+  echo "Flamegraph has been saved @ $VBOX_MOUNTED_PATH/$OUTPUT_FILENAME"
+
+}
+
+
+function init(){
+  case $1 in
+    create_db)
+      echo "Creating a DB container"
+      create_pg_container
+      ;;  
+    init_schema)
+      echo "Creating sample tables in PG container"
+      init_schema
+      ;;
+    attach_bcc)
+      echo "Attaching BCC container"
+      attach_bcc_container
+      ;;
+    flame)
+      echo "flamegraph generation called"
+      generate_flamegraph
+      ;;
+    load_pg)
+      echo "Induce load on PG container"
+      load_pg_db
+      ;;
+    one)
+      echo "Initiating packet trace demo"
+      pushd /usr/share/bcc/tools
+      ./trace_packet.py
+      ;;
+    two)
+      echo -e "Pulling up BCC container\\n\\n"
+      attach_bcc_container &
+      sleep 8
+      echo -e "Inducing load on pg container\\n"
+      load_pg_db                                                       && \
+      sleep 8                                                          && \
+      generate_flamegraph                                              && \
+      echo -e "Removing BCC container\\n"                              && \
+      docker stop "$(docker ps | grep "bccrest" | awk '{print $1}')"
+      ;;
+    #three)
+    #  echo "Creating a new terminal.."
+    #  attach_pts
+    *)
+      echo "Invalid arguments passed..Exiting"
+      echo -e "USAGE: \\n"
+      echo -e "      <script_name> create_db            --   Create a new Postgres container \\n"
+      echo -e "      <script_name> init_schema          --   Creates sample tables in PG container \\n"
+      echo -e "      <script_name> load_pg              --   Loads PG container with test data \\n"    
+      echo -e "      <script_name> flame                --   Creates a flame graph out from container CPU stacks \\n"
+      echo -e "      <script_name> attach_bcc           --   Attach BCC container \\n"
+      echo -e "      <script_name> one                  --   This will start the packet trace demo\\n"
+      echo -e "      <script_name> two                  --   This will start the flamegraph demo\\n"
+      #echo -e "      <script_name> three                --   This will start the ttysnoop demo\\n"
+      ;;
+  esac
+}
+
+init "$@"
+
+
